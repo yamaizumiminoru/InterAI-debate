@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      width: 340px;
+      padding: 10px;
+      font-family: sans-serif;
+    }
+
+    button {
+      width: 100%;
+      margin-bottom: 5px;
+      padding: 8px;
+      cursor: pointer;
+    }
+
+    button.small {
+      width: auto;
+      padding: 4px 8px;
+      font-size: 11px;
+      margin-left: 5px;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    textarea {
+      width: 100%;
+      height: 80px;
+      box-sizing: border-box;
+      font-size: 12px;
+    }
+
+    .status {
+      font-size: 12px;
+      color: #555;
+      margin-top: 10px;
+    }
+
+    .label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 3px;
+    }
+
+    .saved-msg {
+      color: green;
+      font-size: 11px;
+      display: none;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 5px;
+      margin-bottom: 5px;
+    }
+
+    .button-row button {
+      flex: 1;
+      margin-bottom: 0;
+    }
+
+    .turn-indicator {
+      text-align: center;
+      padding: 8px;
+      margin: 8px 0;
+      border-radius: 4px;
+      font-weight: bold;
+      font-size: 13px;
+    }
+
+    .turn-gemini {
+      background: linear-gradient(135deg, #4285f4, #34a853);
+      color: white;
+    }
+
+    .turn-chatgpt {
+      background: linear-gradient(135deg, #10a37f, #1a7f64);
+      color: white;
+    }
+
+    .turn-idle {
+      background: #e0e0e0;
+      color: #666;
+    }
+
+    .turn-paused {
+      background: #ff9800;
+      color: white;
+    }
+  </style>
+</head>
+
+<body>
+  <h3>🤖 AI Debate Controller</h3>
+
+  <div class="label-row">
+    <label>Initial Topic:</label>
+    <div>
+      <button class="small" id="saveDefaultBtn">💾 デフォルトに保存</button>
+      <button class="small" id="resetBtn">🔄 リセット</button>
+    </div>
+  </div>
+  <span class="saved-msg" id="savedMsg">✓ 保存しました</span>
+  <textarea id="prompt">これはGeminiとChatGPTの直接対話です。
+
+【応答ルール】
+・各返答は簡潔に（3文以内）
+・相手の意見に反応してから自分の考えを述べる
+・必ず冒頭に「→」を付けて応答開始を明示</textarea>
+
+  <label>(Re)start from:</label>
+  <select id="startAgent">
+    <option value="gemini">Gemini</option>
+    <option value="chatgpt">ChatGPT</option>
+  </select>
+
+  <br><br>
+
+  <!-- Turn Indicator -->
+  <div class="turn-indicator turn-idle" id="turnIndicator">
+    ⏸ 待機中
+  </div>
+
+  <!-- Main Control Buttons -->
+  <div class="button-row">
+    <button id="startBtn" style="background:#4CAF50;color:white;">▶ Start</button>
+    <button id="restartBtn" style="background:#2196F3;color:white;">🔄 Restart</button>
+  </div>
+
+  <div class="button-row">
+    <button id="pauseBtn" style="background:#ff9800;color:white;" disabled>⏸ Pause</button>
+    <button id="stopBtn" style="background:#f44336;color:white;">⏹ Stop</button>
+  </div>
+
+  <div class="status" id="status">Ready</div>
+  <hr>
+  <div style="font-size:11px">
+    Gemini: <span id="geminiStatus" style="color:red">Disconnected</span><br>
+    ChatGPT: <span id="chatgptStatus" style="color:red">Disconnected</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>

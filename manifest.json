@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "AI Debate Relay",
+  "version": "1.0",
+  "description": "Automate conversation between Gemini and ChatGPT",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "content_gemini.js"
+      ],
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content_chatgpt.js"
+      ],
+      "all_frames": true
+    }
+  ]
+}
