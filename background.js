@@ -117,6 +117,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     console.log("Starting debate, first agent:", firstAgent);
 
+    // Invalidate any content-script work left by the previous run on both tabs.
+    sendToAgent("gemini", { action: "STOP", generation });
+    sendToAgent("chatgpt", { action: "STOP", generation });
+
     detectAgentTabs().then(() => {
       if (!isCurrentGeneration(generation)) return;
       activateTabForAgent(firstAgent, generation);
@@ -159,6 +163,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     console.log(`Restarting debate: ${restartFrom}'s last response -> ${targetAgent}`);
     console.log("Target agent tab:", agentTabs[targetAgent]);
+
+    // Restart is a new generation too. Stop both old content-script pipelines
+    // before arming the selected target.
+    sendToAgent("gemini", { action: "STOP", generation });
+    sendToAgent("chatgpt", { action: "STOP", generation });
 
     detectAgentTabs().then(() => {
       if (!isCurrentGeneration(generation)) return;
@@ -306,30 +315,45 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // chrome.tabs.sendMessage を使用（ポート不要）
 async function sendToAgent(agentName, message) {
-  const tabId = agentTabs[agentName];
+  const generation = Number(message.generation);
+  const isStopMessage = message.action === "STOP";
+
+  const stillAllowed = () => (
+    isStopMessage ||
+    (!Number.isInteger(generation) || isCurrentGeneration(generation))
+  );
+
+  if (!stillAllowed()) {
+    console.log("Skipping stale message before tab lookup:", message.action, generation);
+    return;
+  }
+
+  let tabId = agentTabs[agentName];
   if (!tabId) {
     console.error(`No tab found for ${agentName}`);
-    // タブを再検出
     await detectAgentTabs();
-    const newTabId = agentTabs[agentName];
-    if (!newTabId) {
+    if (!stillAllowed()) return;
+    tabId = agentTabs[agentName];
+    if (!tabId) {
       console.error(`Still no tab for ${agentName} after re-detection`);
       return;
     }
   }
 
-  const targetTabId = agentTabs[agentName];
-  console.log(`Sending to ${agentName} (tab ${targetTabId}):`, message.action);
+  if (!stillAllowed()) return;
+  console.log(`Sending to ${agentName} (tab ${tabId}):`, message.action);
 
   try {
-    // メインフレームにのみ送信（frameId: 0）
-    await chrome.tabs.sendMessage(targetTabId, message, { frameId: 0 });
+    if (!stillAllowed()) return;
+    await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
+    if (!stillAllowed() && !isStopMessage) return;
     console.log(`Message sent to ${agentName} main frame`);
   } catch (e) {
-    console.error(`Failed to send to main frame:`, e);
-    // フォールバック: 全フレームに送信
+    console.error("Failed to send to main frame:", e);
+    if (!stillAllowed()) return;
     try {
-      await chrome.tabs.sendMessage(targetTabId, message);
+      await chrome.tabs.sendMessage(tabId, message);
+      if (!stillAllowed() && !isStopMessage) return;
       console.log(`Message sent to ${agentName} all frames`);
     } catch (e2) {
       console.error(`Failed to send to ${agentName}:`, e2);
