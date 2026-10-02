@@ -14,6 +14,7 @@ let stabilityTimer = null;
 let checkCount = 0;
 let activeGeneration = 0;
 let stopped = true;
+let automatedDraft = null;
 const scheduledTimers = new Set();
 
 function conversationKey() {
@@ -151,6 +152,17 @@ function setInput(text, generation, conversation) {
     flashElement(input, "#0000ff");
     input.focus();
 
+    const existingText = readInputText(input).trim();
+    const isUnchangedAutomatedDraft = (
+        automatedDraft &&
+        automatedDraft.input === input &&
+        existingText === automatedDraft.snapshot
+    );
+    if (existingText && !isUnchangedAutomatedDraft) {
+        console.log("ChatGPT: Input contains user-edited text; automated relay will not overwrite it");
+        return;
+    }
+
     if (typeof input.value === "string") input.value = text;
     if (input.isContentEditable || input.getAttribute("contenteditable") === "true") {
         input.innerText = text;
@@ -161,6 +173,7 @@ function setInput(text, generation, conversation) {
     if (!isCurrentRun(generation, conversation)) return;
 
     const expectedSnapshot = readInputText(input).trim();
+    automatedDraft = { input, snapshot: expectedSnapshot, generation };
     clickSend(input, expectedSnapshot, generation, conversation);
     isWaitingForResponse = true;
     startObserving(generation, conversation);
