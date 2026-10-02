@@ -15,6 +15,7 @@ let stabilityTimer = null;
 let checkCount = 0;
 let activeGeneration = 0;
 let stopped = true;
+let automatedDraft = null;
 
 // timer -> resolver for awaited delays; null for fire-and-forget timers.
 const scheduledWork = new Map();
@@ -201,8 +202,14 @@ async function setInput(text, input, generation, conversation) {
     // Do not erase text the user was already composing. Gemini normally renders
     // placeholder text outside innerText/textContent, so a non-empty editor is
     // treated as user-owned content.
-    if (readInputText(input).trim()) {
-        console.log("GEMINI: Input already contains text; automated relay will not overwrite it");
+    const existingText = readInputText(input).trim();
+    const isUnchangedAutomatedDraft = (
+        automatedDraft &&
+        automatedDraft.input === input &&
+        existingText === automatedDraft.snapshot
+    );
+    if (existingText && !isUnchangedAutomatedDraft) {
+        console.log("GEMINI: Input contains user-edited text; automated relay will not overwrite it");
         return;
     }
 
@@ -340,6 +347,7 @@ async function setInput(text, input, generation, conversation) {
 
     flashElement(input, "#00ff00");
     const expectedSnapshot = currentText;
+    automatedDraft = { input, snapshot: expectedSnapshot, generation };
     clickSend(input, expectedSnapshot, generation, conversation);
     isWaitingForResponse = true;
     startObserving(generation, conversation);
