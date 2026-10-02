@@ -22,6 +22,33 @@ let lastResponses = {
   chatgpt: null
 };
 let pendingMessage = null; // Pause中に保留されたメッセージ
+let runGeneration = 0;
+const scheduledTimers = new Set();
+
+function clearScheduledTimers() {
+  for (const timer of scheduledTimers) clearTimeout(timer);
+  scheduledTimers.clear();
+}
+
+function beginNewGeneration() {
+  clearScheduledTimers();
+  runGeneration += 1;
+  return runGeneration;
+}
+
+function isCurrentGeneration(generation) {
+  return generation === runGeneration && isDebateRunning;
+}
+
+function scheduleForGeneration(generation, delay, callback) {
+  const timer = setTimeout(async () => {
+    scheduledTimers.delete(timer);
+    if (!isCurrentGeneration(generation)) return;
+    await callback();
+  }, delay);
+  scheduledTimers.add(timer);
+  return timer;
+}
 
 // タブを検出して記録（確定済みは上書きしない）
 async function detectAgentTabs() {
@@ -78,6 +105,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === "START_DEBATE") {
+    const generation = beginNewGeneration();
     isDebateRunning = true;
     isPaused = false;
     pendingMessage = null;
@@ -89,13 +117,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     console.log("Starting debate, first agent:", firstAgent);
 
+    // Invalidate any content-script work left by the previous run on both tabs.
+    sendToAgent("gemini", { action: "STOP", generation });
+    sendToAgent("chatgpt", { action: "STOP", generation });
+
     detectAgentTabs().then(() => {
-      activateTabForAgent(firstAgent);
-      setTimeout(() => {
-        if (isDebateRunning && !isPaused) {
-          sendToAgent(firstAgent, { action: "INPUT_PROMPT", text: prompt });
+      if (!isCurrentGeneration(generation)) return;
+      activateTabForAgent(firstAgent, generation);
+      scheduleForGeneration(generation, 1000, async () => {
+        if (!isPaused) {
+          await sendToAgent(firstAgent, { action: "INPUT_PROMPT", text: prompt, generation });
         }
-      }, 1000);
+      });
     });
   }
 
@@ -119,6 +152,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return;
     }
 
+    const generation = beginNewGeneration();
     isDebateRunning = true;
     isPaused = false;
     pendingMessage = null;
@@ -130,17 +164,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log(`Restarting debate: ${restartFrom}'s last response -> ${targetAgent}`);
     console.log("Target agent tab:", agentTabs[targetAgent]);
 
+    // Restart is a new generation too. Stop both old content-script pipelines
+    // before arming the selected target.
+    sendToAgent("gemini", { action: "STOP", generation });
+    sendToAgent("chatgpt", { action: "STOP", generation });
+
     detectAgentTabs().then(() => {
+      if (!isCurrentGeneration(generation)) return;
       console.log("After detectAgentTabs:", JSON.stringify(agentTabs));
-      activateTabForAgent(targetAgent);
-      setTimeout(() => {
+      activateTabForAgent(targetAgent, generation);
+      scheduleForGeneration(generation, 1000, async () => {
         console.log("Timeout fired, sending INPUT_PROMPT to", targetAgent);
-        if (isDebateRunning && !isPaused) {
-          sendToAgent(targetAgent, { action: "INPUT_PROMPT", text: lastResponse });
-        } else {
-          console.log("Skipped: running=", isDebateRunning, "paused=", isPaused);
+        if (!isPaused) {
+          await sendToAgent(targetAgent, { action: "INPUT_PROMPT", text: lastResponse, generation });
         }
-      }, 1000);
+      });
     });
 
     sendResponse({ restarted: true });
@@ -161,13 +199,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const { target, text } = pendingMessage;
       pendingMessage = null;
 
+      const generation = runGeneration;
       detectAgentTabs().then(() => {
-        activateTabForAgent(target);
-        setTimeout(() => {
-          if (isDebateRunning && !isPaused) {
-            sendToAgent(target, { action: "INPUT_PROMPT", text: text });
+        if (!isCurrentGeneration(generation)) return;
+        activateTabForAgent(target, generation);
+        scheduleForGeneration(generation, 1000, async () => {
+          if (!isPaused) {
+            await sendToAgent(target, { action: "INPUT_PROMPT", text, generation });
           }
-        }, 1000);
+        });
       });
     }
 
@@ -177,6 +217,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   else if (request.action === "STOP_DEBATE") {
     console.log("STOPPING DEBATE");
+    const stoppedGeneration = beginNewGeneration();
     isDebateRunning = false;
     isPaused = false;
     currentTurn = null;
@@ -186,8 +227,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     confirmedTabs = { gemini: false, chatgpt: false };
 
     // 両方の content script に停止を通知
-    sendToAgent('gemini', { action: "STOP" });
-    sendToAgent('chatgpt', { action: "STOP" });
+    sendToAgent('gemini', { action: "STOP", generation: stoppedGeneration });
+    sendToAgent('chatgpt', { action: "STOP", generation: stoppedGeneration });
 
     sendResponse({ stopped: true });
   }
@@ -195,9 +236,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   else if (request.action === "RESPONSE_COMPLETE") {
     const source = request.source;
     const responseText = request.text;
+    const responseGeneration = request.generation;
     const target = source === 'gemini' ? 'chatgpt' : 'gemini';
 
-    // ALWAYS store last response (for Restart functionality)
+    if (responseGeneration !== runGeneration) {
+      console.log("Ignoring stale response from generation", responseGeneration);
+      return;
+    }
+
+    // Store only responses that belong to the current run.
     lastResponses[source] = responseText;
     console.log(`Stored ${source}'s response (${responseText.length} chars)`);
     console.log("Current lastResponses:", JSON.stringify({
@@ -214,7 +261,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // Check if paused
     if (isPaused) {
       console.log("Debate is paused, storing pending message for", target);
-      pendingMessage = { target, text: responseText };
+      pendingMessage = { target, text: responseText, generation: responseGeneration };
       currentTurn = target; // Still update turn indicator
       return;
     }
@@ -224,23 +271,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     // まずタブを再検出
     detectAgentTabs().then(() => {
-      if (!isDebateRunning) return; // 再確認
+      if (!isCurrentGeneration(responseGeneration)) return;
       if (isPaused) {
-        // Paused during detection
-        pendingMessage = { target, text: responseText };
+        pendingMessage = { target, text: responseText, generation: responseGeneration };
         return;
       }
 
-      activateTabForAgent(target);
+      activateTabForAgent(target, responseGeneration);
 
-      // 待機してからメッセージ送信
-      setTimeout(() => {
-        if (isDebateRunning && !isPaused) {
-          sendToAgent(target, { action: "INPUT_PROMPT", text: responseText });
-        } else if (isPaused) {
-          pendingMessage = { target, text: responseText };
+      // Wait before relaying, but invalidate the timer on STOP/restart.
+      scheduleForGeneration(responseGeneration, 3000, async () => {
+        if (!isPaused) {
+          await sendToAgent(target, { action: "INPUT_PROMPT", text: responseText, generation: responseGeneration });
+        } else {
+          pendingMessage = { target, text: responseText, generation: responseGeneration };
         }
-      }, 3000);
+      });
     });
   }
 
@@ -269,30 +315,45 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // chrome.tabs.sendMessage を使用（ポート不要）
 async function sendToAgent(agentName, message) {
-  const tabId = agentTabs[agentName];
+  const generation = Number(message.generation);
+  const isStopMessage = message.action === "STOP";
+
+  const stillAllowed = () => (
+    isStopMessage ||
+    (!Number.isInteger(generation) || isCurrentGeneration(generation))
+  );
+
+  if (!stillAllowed()) {
+    console.log("Skipping stale message before tab lookup:", message.action, generation);
+    return;
+  }
+
+  let tabId = agentTabs[agentName];
   if (!tabId) {
     console.error(`No tab found for ${agentName}`);
-    // タブを再検出
     await detectAgentTabs();
-    const newTabId = agentTabs[agentName];
-    if (!newTabId) {
+    if (!stillAllowed()) return;
+    tabId = agentTabs[agentName];
+    if (!tabId) {
       console.error(`Still no tab for ${agentName} after re-detection`);
       return;
     }
   }
 
-  const targetTabId = agentTabs[agentName];
-  console.log(`Sending to ${agentName} (tab ${targetTabId}):`, message.action);
+  if (!stillAllowed()) return;
+  console.log(`Sending to ${agentName} (tab ${tabId}):`, message.action);
 
   try {
-    // メインフレームにのみ送信（frameId: 0）
-    await chrome.tabs.sendMessage(targetTabId, message, { frameId: 0 });
+    if (!stillAllowed()) return;
+    await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
+    if (!stillAllowed() && !isStopMessage) return;
     console.log(`Message sent to ${agentName} main frame`);
   } catch (e) {
-    console.error(`Failed to send to main frame:`, e);
-    // フォールバック: 全フレームに送信
+    console.error("Failed to send to main frame:", e);
+    if (!stillAllowed()) return;
     try {
-      await chrome.tabs.sendMessage(targetTabId, message);
+      await chrome.tabs.sendMessage(tabId, message);
+      if (!stillAllowed() && !isStopMessage) return;
       console.log(`Message sent to ${agentName} all frames`);
     } catch (e2) {
       console.error(`Failed to send to ${agentName}:`, e2);
@@ -300,7 +361,7 @@ async function sendToAgent(agentName, message) {
   }
 }
 
-function activateTabForAgent(agentName) {
+function activateTabForAgent(agentName, generation = runGeneration) {
   const tabId = agentTabs[agentName];
   if (!tabId) {
     console.error(`No tab found for ${agentName}`);
@@ -310,6 +371,7 @@ function activateTabForAgent(agentName) {
   console.log(`Activating ${agentName} -> Tab: ${tabId}`);
 
   chrome.tabs.get(tabId, (tab) => {
+    if (!isCurrentGeneration(generation)) return;
     if (chrome.runtime.lastError) {
       console.error("Tab get error:", chrome.runtime.lastError);
       return;
@@ -322,16 +384,23 @@ function activateTabForAgent(agentName) {
       focused: true,
       drawAttention: true
     }, () => {
+      if (!isCurrentGeneration(generation)) return;
       // 2. タブをアクティブに
       chrome.tabs.update(tabId, { active: true }, () => {
+        if (!isCurrentGeneration(generation)) return;
         // 3. もう一度ウィンドウをフォーカス
         chrome.windows.update(windowId, { focused: true }, () => {
+          if (!isCurrentGeneration(generation)) return;
           console.log(`${agentName} activation complete`);
 
-          // 4. フォーカス要求を送信
-          sendToAgent(agentName, { action: "ENSURE_FOCUS" });
-          setTimeout(() => sendToAgent(agentName, { action: "ENSURE_FOCUS" }), 500);
-          setTimeout(() => sendToAgent(agentName, { action: "ENSURE_FOCUS" }), 1000);
+          // 4. フォーカス要求を送信. These timers are generation-bound too.
+          sendToAgent(agentName, { action: "ENSURE_FOCUS", generation });
+          scheduleForGeneration(generation, 500, () =>
+            sendToAgent(agentName, { action: "ENSURE_FOCUS", generation })
+          );
+          scheduleForGeneration(generation, 1000, () =>
+            sendToAgent(agentName, { action: "ENSURE_FOCUS", generation })
+          );
         });
       });
     });
